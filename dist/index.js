@@ -74,8 +74,10 @@ const socketHandler = (socket, clients) => {
                 sendVoteResponse(socket, acceptVoteRequest(msg.data));
                 break;
             case types_1.MsgType.AppendEntriesRequest:
+                sendAppendEntriesResponse(socket, acceptAppendEntries(msg.data));
                 break;
             case types_1.MsgType.VoteResponse:
+                acceptVoteResponse(msg.data);
                 break;
             case types_1.MsgType.AppendEntriesResponse:
                 break;
@@ -147,7 +149,7 @@ const acceptVoteRequest = (data) => {
         return false;
     }
     if (data.term > state.currentTerm) {
-        resetElectionTimeout(electionTimeout);
+        resetElectionTimeout();
         state.currentTerm = data.term;
         resetRole2Follower();
         vote();
@@ -158,6 +160,24 @@ const acceptVoteRequest = (data) => {
         return true;
     }
     return false;
+};
+const acceptVoteResponse = (data) => {
+    if (data.term < state.currentTerm) {
+        return;
+    }
+    if (data.term > state.currentTerm) {
+        resetElectionTimeout();
+        state.currentTerm = data.term;
+        resetRole2Follower();
+        return;
+    }
+    if (data.voteGranted) {
+        state.voteCount++;
+        if (state.voteCount > ports.length / 2) {
+            state.role = types_1.Role.Leader;
+            console.log(getPrefix(electPrefix), "Became leader", state);
+        }
+    }
 };
 const selfVote = () => {
     state.votedFor = -1;
@@ -172,22 +192,74 @@ const resetRole2Follower = () => {
     state.voteCount = 0;
     console.log(getPrefix(electPrefix), "Reset to follower", state);
 };
+const timeoutPrefix = "TIMEOUT";
 const startElectionTimeout = () => {
     const randTime = getTime(Math.floor(Math.random() * 150) + 150);
-    console.log(getPrefix(electPrefix), "Starting election timeout", randTime, state);
+    console.log(getPrefix(timeoutPrefix), "Starting election timeout", randTime, state);
     const timeout = setTimeout(() => {
-        console.log(getPrefix(electPrefix), "Election timeout", randTime, state);
+        console.log(getPrefix(timeoutPrefix), "Election timeout", randTime, state);
         selfVote();
         sendVoteRequest();
         electionTimeout = startElectionTimeout();
-        // timeout.refresh()
     }, randTime);
     return timeout;
 };
-const resetElectionTimeout = (timeout) => {
-    console.log(getPrefix(electPrefix), "Resetting election timeout");
-    (0, timers_1.clearTimeout)(timeout);
+const resetElectionTimeout = () => {
+    console.log(getPrefix(timeoutPrefix), "Resetting election timeout");
+    (0, timers_1.clearTimeout)(electionTimeout);
     electionTimeout = startElectionTimeout();
     // timeout.refresh()
 };
 let electionTimeout = startElectionTimeout();
+//SECTION: HEARTBEAT & LOG REPLICATION
+const heartbeatPrefix = "HEARTBEAT";
+const sendHeartbeat = () => {
+    bcMsg({
+        type: types_1.MsgType.AppendEntriesRequest,
+        data: {
+            term: state.currentTerm,
+            leaderId: selfPort,
+            prevLogIndex: 0,
+            prevLogTerm: 0,
+            entries: [],
+            leaderCommit: 0
+        }
+    });
+};
+const acceptAppendEntries = (data) => {
+    if (data.term < state.currentTerm) {
+        return false;
+    }
+    if (data.term > state.currentTerm) {
+        //TODO: rollback log
+        resetElectionTimeout();
+        state.currentTerm = data.term;
+        resetRole2Follower();
+        return true;
+    }
+    if (state.role == types_1.Role.Candidate) {
+        resetElectionTimeout();
+        resetRole2Follower();
+        return true;
+    }
+    if (state.role == types_1.Role.Follower) {
+        resetElectionTimeout();
+        return true;
+    }
+    return false;
+};
+const sendAppendEntriesResponse = (client, success) => {
+    sendMsg(client, {
+        type: types_1.MsgType.AppendEntriesResponse,
+        data: {
+            term: state.currentTerm,
+            success: success
+        }
+    });
+};
+const heartbeatTimeout = setInterval(() => {
+    if (state.role == types_1.Role.Leader) {
+        resetElectionTimeout();
+        sendHeartbeat();
+    }
+}, getTime(100));
