@@ -14,7 +14,12 @@ export type SystemState = {
 
 export type LogEntry = {
     term: number;
-    command: string;
+    command: LogCommand;
+}
+
+export type LogCommand = {
+    key: string;
+    value: string
 }
 
 export enum MsgType {
