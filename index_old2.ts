@@ -1,3 +1,4 @@
+/*
 import net from "net"
 import readline from 'node:readline';
 import {stdin as input, stdout as output} from 'node:process';
@@ -308,3 +309,4 @@ const heartbeatInterval = setInterval(() => {
         sendAppendEntities()
     }
 }, getTime(100))
+*/

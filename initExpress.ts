@@ -13,7 +13,7 @@ export default async () => {
 
     app.use((req, res, next) => {
         let date = new Date().toUTCString()
-        console.log('📦 [request]')
+        console.log('[📦 REQUEST]')
         console.log('-- Time:', date)
         console.log('-- Req:', req.method, req.url)
         next()
@@ -22,7 +22,7 @@ export default async () => {
     app.use(express.json())
     app.use('/', general)
     app.listen(port, () => {
-        console.log(`⚡️ [server]: Server is running at http://localhost:${port}`);
+        console.log(`[⚡️ WEBSERVER]: Server is running at http://localhost:${port}`);
     });
 }
 

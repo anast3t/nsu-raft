@@ -1,24 +1,36 @@
-import {AppendEntriesRequest, Message, MsgType, Role, SystemState, VoteRequest, VoteResponse} from "../types";
+import {AppendEntriesRequest, LogEntry, Message, MsgType, Role, SystemState, VoteRequest, VoteResponse} from "../types";
 import net from "net";
 import {clearTimeout} from "timers";
+import {RaftStorage} from "./RaftStorage";
+import {RaftLogEntry} from "./RaftLogEntry";
+import {TwoWayMap} from "./TwoWayMap";
 //Clear-Host; yarn doc; $env:RAFTPORT='5000'; $env:EXPRESSPORT='3000'; yarn packdev
 //Clear-Host; yarn doc; $env:RAFTPORT='6000'; $env:EXPRESSPORT='3001'; yarn packdev
 //Clear-Host; yarn doc; $env:RAFTPORT='7000'; $env:EXPRESSPORT='3002'; yarn packdev
 export class RaftNode {
     private server: net.Server | undefined = undefined;
-    private state: SystemState;
+    private state: SystemState = {
+        role: Role.Follower,
+        currentTerm: 0,
+        votedFor: 0,
+        voteCount: 0,
+    };
     private clients: net.Socket[] = [];
     private selfPort: number;
     private ports: number[];
+    private clientPortMap = new TwoWayMap<number, number>(); // clientPort -> realPort
     private filteredPorts: number[];
     private electionTimeout: NodeJS.Timeout | undefined = undefined
     private heartbeatInterval: NodeJS.Timeout | undefined = undefined
-    private storage: Map<string, object>;
+    private logEntry: RaftLogEntry = new RaftLogEntry()
     private SECONDS_MULTIPLIER: number = 20;
 
-    private electPrefix = "ELECT"
-    private connPrefix = "CONN"
-    private timeoutPrefix = "TIMEOUT"
+    private electPrefix = "🗳️ELECTION"
+    private connPrefix = "🔗 CONNECTION"
+    private selfConnPrefix = "🔗 SELF CONNECTION"
+    private timeoutPrefix = "⏰  TIMEOUT"
+    private readPrefix = "📩 READ"
+    private writePrefix = "📡 WRITE"
 
     constructor(
         args: {
@@ -28,20 +40,12 @@ export class RaftNode {
     ) {
         this.selfPort = args.selfPort;
         this.ports = args.ports;
-        this.state = {
-            role: Role.Follower,
-            currentTerm: 0,
-            votedFor: 0,
-            voteCount: 0,
-            log: []
-        }
         this.filteredPorts = this.ports.filter(p => p !== this.selfPort);
-        this.storage = new Map<string, object>()
     }
 
     //SECTION: PUBLIC
 
-    public start(){
+    public start() {
         this.server = net.createServer(this.socketHandler.bind(this));
         this.server.listen(this.selfPort, '127.0.0.1');
 
@@ -53,6 +57,30 @@ export class RaftNode {
 
         this.heartbeatInterval = this.startHeartbeatInterval()
         this.electionTimeout = this.startElectionTimeout()
+    }
+
+    public addLogEntry(key: string, value: string) {
+        this.logEntry.push(
+            {
+                term: this.state.currentTerm,
+                command: {
+                    key: key,
+                    value: value
+                }
+            },
+            this.logEntry.prevIndex,
+            this.logEntry.prevTerm
+        )
+    }
+
+    get role() {
+        return this.state.role
+    }
+
+    //SECTION: REPLICATION
+
+    private replicate() {
+
     }
 
     //SECTION: TIME
@@ -71,23 +99,23 @@ export class RaftNode {
         console.log(this.getPrefix(prefix), ...args)
     }
 
-    //SECTION: SOCKET MESSAGE ENCODDING AND DECODING
+    //SECTION: SOCKET MESSAGE ENCODDING | DECODING | SENDING
 
     private bcMsg(data: Message) {
         this.clients.forEach(client => {
             client.write(JSON.stringify(data))
         })
-        this.customLog(("WRITE"), "Sent BC", data, "To", this.clients.map(c => c.remotePort))
+        this.customLog((this.writePrefix), "Sent BC", data, "To", this.clientPortMap)
     }
 
     private sendMsg(client: net.Socket, data: Message) {
         client.write(JSON.stringify(data));
-        this.customLog(("WRITE"), "Sent to node ", data, client.remotePort)
+        this.customLog((this.writePrefix), "Sent to node ", data, client.remotePort)
     }
 
     private acceptMsg(data: string): Message {
         const json = JSON.parse(data)
-        this.customLog(("READ"), "Got ", json)
+        this.customLog((this.readPrefix), "Got ", json)
         return json as Message
     }
 
@@ -95,21 +123,25 @@ export class RaftNode {
 
     private socketHandler(socket: net.Socket) {
         this.customLog((this.connPrefix), "Connection", socket.remoteAddress, socket.remotePort, this.clients.map(c => c.remotePort))
-        const port = socket.remotePort;
+        const port = socket.remotePort as number;
 
         const popClient = () => {
             const index = this.clients.indexOf(socket);
             if (index > -1) {
                 this.clients.splice(index, 1);
             }
+            this.clientPortMap.delete(port)
         }
 
         socket.on("data", (raw) => {
             const msgstr = raw.toString();
-            this.customLog(("READ"), "Msg from", socket.remotePort)
+            this.customLog(this.readPrefix, "Msg from", port, this.clientPortMap.get(port))
 
             const msg = this.acceptMsg(msgstr)
             switch (msg.type) {
+                case MsgType.BondRequest:
+                    this.clientPortMap.set(port, msg.data)
+                    break;
                 case MsgType.VoteRequest:
                     this.sendVoteResponse(socket, this.acceptVoteRequest(msg.data))
                     break;
@@ -138,17 +170,21 @@ export class RaftNode {
     }
 
     private selfConnect(port: number) {
-        const selfConnPrefix = "SELFCONN"
 
-        this.customLog((selfConnPrefix), "Trying to connect to port: " + port)
+        this.customLog((this.selfConnPrefix), "Trying to connect to port: " + port)
         const client = net.createConnection({
             port: port
         }, () => {
-            this.customLog((selfConnPrefix), "Connected to port: " + port, this.clients.map(c => c.remotePort))
+            this.customLog((this.selfConnPrefix), "Connected to port: " + port, this.clients.map(c => c.remotePort))
+            this.sendMsg(client, {
+                type: MsgType.BondRequest,
+                data: this.selfPort
+            })
+            this.clientPortMap.set(port, port)
             this.socketHandler(client)
         })
         client.on("error", (error) => {
-            this.customLog((selfConnPrefix), "Error connecting to port: " + port)
+            this.customLog((this.selfConnPrefix), "Error connecting to port: " + port)
         })
     }
 
@@ -160,7 +196,6 @@ export class RaftNode {
             voteCount: 1,
             currentTerm: this.state.currentTerm + 1,
             role: Role.Candidate,
-            log: this.state.log
         }
         this.customLog((this.electPrefix), "Voted for self", this.state)
     }
@@ -171,7 +206,6 @@ export class RaftNode {
             voteCount: 0,
             currentTerm: this.state.currentTerm,
             role: Role.Follower,
-            log: this.state.log
         }
         this.customLog((this.electPrefix), "Reset to follower", this.state)
     }
@@ -249,16 +283,16 @@ export class RaftNode {
 
     //SECTION: [SEND] APPEAND ENTRIES
 
-    private sendAppendEntries() {
+    private sendAppendEntries(entries: LogEntry[] = []) {
         this.bcMsg({
             type: MsgType.AppendEntriesRequest,
             data: {
                 term: this.state.currentTerm,
                 leaderId: this.selfPort,
-                prevLogIndex: 0,
-                prevLogTerm: 0,
-                entries: [],
-                leaderCommit: 0
+                prevLogIndex: this.logEntry.prevIndex,
+                prevLogTerm: this.logEntry.prevTerm,
+                entries: entries,
+                leaderCommit: this.logEntry.commitIndex
             }
         })
     }
@@ -276,24 +310,30 @@ export class RaftNode {
     //SECTION: [ACCEPT] APPEAND ENTRIES
 
     private acceptAppendEntries(data: AppendEntriesRequest) {
+        const push = () => {
+            this.resetElectionTimeout()
+            if (data.entries.length > 0) {
+                this.customLog((this.electPrefix), "Pushed entry", data.entries[0], this.state)
+                return this.logEntry.push(data.entries[0], data.prevLogIndex, data.prevLogTerm)
+            }
+            return true
+        }
+
         if (data.term < this.state.currentTerm) {
             return false
         }
         if (data.term > this.state.currentTerm) {
-            //TODO: rollback log
             this.resetElectionTimeout()
             this.state.currentTerm = data.term
             this.resetRole2Follower()
             return true
         }
         if (this.state.role == Role.Candidate) {
-            this.resetElectionTimeout()
             this.resetRole2Follower()
-            return true
+            return push()
         }
         if (this.state.role == Role.Follower) {
-            this.resetElectionTimeout()
-            return true
+            return push()
         }
         return false
     }

@@ -9,7 +9,6 @@ export type SystemState = {
     currentTerm: number;
     votedFor: number;
     voteCount: number;
-    log: LogEntry[];
 }
 
 export type LogEntry = {
@@ -23,6 +22,7 @@ export type LogCommand = {
 }
 
 export enum MsgType {
+    "BondRequest",
     "VoteRequest",
     "AppendEntriesRequest",
     "VoteResponse",
@@ -67,4 +67,7 @@ export type Message = {
 } | {
     type: MsgType.AppendEntriesResponse,
     data: AppendEntriesResponse
+} | {
+    type: MsgType.BondRequest,
+    data: number
 }
