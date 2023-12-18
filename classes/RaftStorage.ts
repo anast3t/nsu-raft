@@ -1,13 +1,19 @@
 import {LogEntry} from "../types";
 export class RaftStorage {
-    private storage: Map<string, string> = new Map([["init", "init"]]);
+    private _storage: Map<string, string> = new Map();
+
+    get storage (){
+        return this._storage;
+    }
 
     public get(key: string): string | undefined {
         return this.storage.get(key);
     }
 
     public set(key: string, value: string) {
+        console.log("[STORAGE] SET", key, value)
         this.storage.set(key, value);
+        console.log("[STORAGE] STORAGE STATE", this.storage)
     }
 
     public delete(key: string) {
