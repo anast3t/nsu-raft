@@ -1,4 +1,14 @@
-import {AppendEntriesRequest, LogEntry, Message, MsgType, Role, SystemState, VoteRequest, VoteResponse} from "../types";
+import {
+    AppendEntriesRequest,
+    AppendEntriesResponse,
+    LogEntry,
+    Message,
+    MsgType,
+    Role,
+    SystemState,
+    VoteRequest,
+    VoteResponse
+} from "../types";
 import net from "net";
 import {clearTimeout} from "timers";
 import {RaftStorage} from "./RaftStorage";
@@ -22,7 +32,7 @@ export class RaftNode {
     private filteredPorts: number[];
     private electionTimeout: NodeJS.Timeout | undefined = undefined
     private heartbeatInterval: NodeJS.Timeout | undefined = undefined
-    private logEntry: RaftLogEntry = new RaftLogEntry()
+    private _logEntries: RaftLogEntry = new RaftLogEntry()
     private SECONDS_MULTIPLIER: number = 20;
 
     private electPrefix = "🗳️ELECTION"
@@ -31,6 +41,7 @@ export class RaftNode {
     private timeoutPrefix = "⏰  TIMEOUT"
     private readPrefix = "📩 READ"
     private writePrefix = "📡 WRITE"
+    private replicatePrefix = "📝 REPLICATE"
 
     constructor(
         args: {
@@ -60,16 +71,14 @@ export class RaftNode {
     }
 
     public addLogEntry(key: string, value: string) {
-        this.logEntry.push(
+        this.logEntries.leaderPush(
             {
                 term: this.state.currentTerm,
                 command: {
                     key: key,
                     value: value
                 }
-            },
-            this.logEntry.prevIndex,
-            this.logEntry.prevTerm
+            }
         )
     }
 
@@ -77,10 +86,29 @@ export class RaftNode {
         return this.state.role
     }
 
+    get logEntries() {
+        return this._logEntries
+    }
+
     //SECTION: REPLICATION
 
-    private replicate() {
+    private sendAppendEntriesToClient(port: number) {
+        const nextIndex = this.logEntries.getNextIndex(port) as number;
+        const entries = this.logEntries.getEntriesFrom(nextIndex);
+        this.sendAppendEntries(
+            this.clients.find(c => c.remotePort == this.clientPortMap.rGet(port)) as net.Socket,
+            entries,
+            nextIndex - 1,
+            this.logEntries.getLogTerm(nextIndex - 1) as number
+        )
+    }
 
+    private bcReplicate() {
+        this.filteredPorts.forEach(port => {
+            if (this.clientPortMap.rHas(port)) {
+                this.sendAppendEntriesToClient(port)
+            }
+        })
     }
 
     //SECTION: TIME
@@ -152,6 +180,7 @@ export class RaftNode {
                     this.acceptVoteResponse(msg.data);
                     break;
                 case MsgType.AppendEntriesResponse:
+                    this.acceptAppendEntriesResponse(msg.data, socket)
                     break;
             }
         });
@@ -208,6 +237,14 @@ export class RaftNode {
             role: Role.Follower,
         }
         this.customLog((this.electPrefix), "Reset to follower", this.state)
+    }
+
+    private tryBecomeLeader() {
+        if (this.state.voteCount > this.ports.length / 2) {
+            this.customLog((this.electPrefix), "Became leader", this.state)
+            this.state.role = Role.Leader
+            this.logEntries.reinitIndex(this.filteredPorts);
+        }
     }
 
     //SECTION: [SEND] VOTE REQUEST
@@ -274,25 +311,41 @@ export class RaftNode {
         }
         if (data.voteGranted) {
             this.state.voteCount++
-            if (this.state.voteCount > this.ports.length / 2) {
-                this.state.role = Role.Leader
-                this.customLog((this.electPrefix), "Became leader", this.state)
-            }
+            this.tryBecomeLeader()
         }
     }
 
-    //SECTION: [SEND] APPEAND ENTRIES
+    //SECTION: [SEND] APPEND ENTRIES
 
-    private sendAppendEntries(entries: LogEntry[] = []) {
-        this.bcMsg({
+    /*    private bcAppendEntries(entries: LogEntry[] = []) {
+            this.bcMsg({
+                type: MsgType.AppendEntriesRequest,
+                data: {
+                    term: this.state.currentTerm,
+                    leaderId: this.selfPort,
+                    prevLogIndex: this.logEntries.prevIndex,
+                    prevLogTerm: this.logEntries.prevTerm,
+                    entries: entries,
+                    leaderCommit: this.logEntries.commitIndex
+                }
+            })
+        }*/
+
+    private sendAppendEntries(
+        client: net.Socket,
+        entries: LogEntry[] = [],
+        prevLogIndex: number,
+        prevLogTerm: number
+    ) {
+        this.sendMsg(client, {
             type: MsgType.AppendEntriesRequest,
             data: {
                 term: this.state.currentTerm,
                 leaderId: this.selfPort,
-                prevLogIndex: this.logEntry.prevIndex,
-                prevLogTerm: this.logEntry.prevTerm,
+                prevLogIndex: prevLogIndex,
+                prevLogTerm: prevLogTerm,
                 entries: entries,
-                leaderCommit: this.logEntry.commitIndex
+                leaderCommit: this.logEntries.commitIndex
             }
         })
     }
@@ -312,10 +365,20 @@ export class RaftNode {
     private acceptAppendEntries(data: AppendEntriesRequest) {
         const push = () => {
             this.resetElectionTimeout()
-            if (data.entries.length > 0) {
-                this.customLog((this.electPrefix), "Pushed entry", data.entries[0], this.state)
-                return this.logEntry.push(data.entries[0], data.prevLogIndex, data.prevLogTerm)
+            if (data.entries.length > 0)
+                this.customLog((this.replicatePrefix), "Pushing entries", JSON.stringify(data.entries))
+            const res = this.logEntries.push(data)
+            if (!res) {
+                if (data.entries.length > 0)
+                    this.customLog((this.replicatePrefix), "Pushing entries failed")
+                return false
             }
+            if (data.entries.length > 0)
+                this.customLog(
+                    (this.replicatePrefix),
+                    "Pushing entries succeeded",
+                    JSON.stringify(this.logEntries.logEntries)
+                )
             return true
         }
 
@@ -326,7 +389,7 @@ export class RaftNode {
             this.resetElectionTimeout()
             this.state.currentTerm = data.term
             this.resetRole2Follower()
-            return true
+            return push()
         }
         if (this.state.role == Role.Candidate) {
             this.resetRole2Follower()
@@ -336,6 +399,43 @@ export class RaftNode {
             return push()
         }
         return false
+    }
+
+    private acceptAppendEntriesResponse(data: AppendEntriesResponse, client: net.Socket) {
+        if (data.term < this.state.currentTerm) {
+            return
+        }
+        if (data.term > this.state.currentTerm) {
+            this.resetElectionTimeout()
+            this.state.currentTerm = data.term
+            this.resetRole2Follower()
+            return
+        }
+        const port = this.clientPortMap.get(client.remotePort as number) as number
+        if (data.success) {
+            this.customLog((this.replicatePrefix),
+                "Incrementing matchIndex for",
+                port, "to",
+                this.logEntries.prevIndex
+            )
+            this.logEntries.setNextIndex(
+                port,
+                this.logEntries.prevIndex + 1,
+            )
+            this.logEntries.setMatchIndex(
+                port,
+                this.logEntries.prevIndex,
+            )
+        } else {
+            this.customLog((this.replicatePrefix),
+                "Decrementing nextIndex for",
+                port, "to",
+                this.logEntries.getNextIndex(port) - 1);
+            this.logEntries.setNextIndex(
+                port,
+                this.logEntries.getNextIndex(port) - 1,
+            )
+        }
     }
 
 
@@ -364,7 +464,7 @@ export class RaftNode {
         return setInterval(() => {
             if (this.state.role == Role.Leader) {
                 this.resetElectionTimeout()
-                this.sendAppendEntries()
+                this.bcReplicate()
             }
         }, this.getTime(100))
     }

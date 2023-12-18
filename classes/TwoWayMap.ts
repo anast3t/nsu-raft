@@ -26,6 +26,10 @@ export class TwoWayMap<T, V> {
         return this.forwardMap.has(key);
     }
 
+    public rHas(key: V): boolean {
+        return this.reverseMap.has(key);
+    }
+
     public clear() {
         this.forwardMap.clear();
         this.reverseMap.clear();

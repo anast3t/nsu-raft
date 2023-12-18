@@ -12,6 +12,10 @@ router.get('/get/:key', (req: Request, res: Response)=>{
     const key = req.params.key;
 })
 
+router.get('/get', (req: Request, res: Response)=>{
+    res.status(200).send(raftNode.logEntries.logEntries)
+})
+
 router.post('/set', (req: Request, res: Response)=>{
     const key = req.body.key;
     const val = req.body.value;
