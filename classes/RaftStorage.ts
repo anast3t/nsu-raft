@@ -1,6 +1,9 @@
 import {LogEntry} from "../types";
+import {customLog} from "../utils";
 export class RaftStorage {
     private _storage: Map<string, string> = new Map();
+
+    private storagePrefix = "💽 STORAGE"
 
     get storage (){
         return this._storage;
@@ -11,32 +14,8 @@ export class RaftStorage {
     }
 
     public set(key: string, value: string) {
-        console.log("[STORAGE] SET", key, value)
+        customLog(this.storagePrefix, "SET", key, value)
         this.storage.set(key, value);
-        console.log("[STORAGE] STORAGE STATE", this.storage)
-    }
-
-    public delete(key: string) {
-        this.storage.delete(key);
-    }
-
-    public has(key: string): boolean {
-        return this.storage.has(key);
-    }
-
-    public clear() {
-        this.storage.clear();
-    }
-
-    public size(): number {
-        return this.storage.size;
-    }
-
-    public keys(): string[] {
-        return Array.from(this.storage.keys());
-    }
-
-    public values(): string[] {
-        return Array.from(this.storage.values());
+        customLog(this.storagePrefix,"STORAGE STATE", this.storage)
     }
 }

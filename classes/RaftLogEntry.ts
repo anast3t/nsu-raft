@@ -1,17 +1,27 @@
 import {AppendEntriesRequest, LogEntry} from "../types";
+import {RaftStorage} from "./RaftStorage";
+import {customLog} from "../utils";
 
 export class RaftLogEntry {
     private _logEntries: LogEntry[] = [{
         term: 0,
         command: {
-            key: "init",
-            value: "init"
+            key: "",
+            value: ""
         }
-    }];
-    private _commitIndex: number = 1;
+    }]; //INDEX FROM 1
+    private _commitIndex: number = 0;
     private _lastApplied: number = 0;
     private nextIndex: Map<number, number> = new Map();
     private matchIndex: Map<number, number> = new Map();
+
+    private commitPrefix = "💾 COMMIT"
+
+    private storage: RaftStorage;
+
+    constructor(storage: RaftStorage) {
+        this.storage = storage;
+    }
 
     get commitIndex(): number {
         return this._commitIndex;
@@ -49,8 +59,8 @@ export class RaftLogEntry {
         return this.logEntries[index];
     }
 
-    public getLogTerm(index: number): number | undefined {
-        return this.logEntries[index]?.term;
+    public getLogTerm(index: number): number {
+        return this.logEntries[index]?.term ?? 0;
     }
 
     public getEntriesFrom(index: number): LogEntry[] {
@@ -74,11 +84,11 @@ export class RaftLogEntry {
     }
 
     get prevIndex(): number {
-        return this.logEntries.length - 1;
+        return Math.max(this.logEntries.length - 1, 0);
     }
 
     get prevTerm(): number {
-        return this.logEntries[this.prevIndex].term;
+        return Math.max(this.logEntries[this.prevIndex].term, 0);
     }
 
     public push(
@@ -99,7 +109,7 @@ export class RaftLogEntry {
         5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
         */
 
-        if (this.get(data.prevLogIndex)?.term != data.prevLogTerm) {
+        if (data.prevLogTerm !== 0 && this.get(data.prevLogIndex)?.term != data.prevLogTerm) {
             return false;
         }
 
@@ -107,16 +117,50 @@ export class RaftLogEntry {
             this.logEntries.push(el);
         })
 
-        if (this.commitIndex < data.leaderCommit){
+        if (this.commitIndex < data.leaderCommit) {
             this._commitIndex = Math.min(data.leaderCommit, this.prevIndex);
+            this.pushToStorage()
         }
 
         return true;
     }
 
-    public leaderPush (logEntry: LogEntry) {
+    public leaderPush(logEntry: LogEntry) {
         this.logEntries.push(logEntry);
-        this._commitIndex++
     }
 
+    public leaderTryCommit() {
+        const totalLen = this.matchIndex.size
+        const res: object = Array
+            .from(this.matchIndex.values())
+            .filter(el => el > this.commitIndex)
+            .reduce(function (acc: any, curr) {
+                acc[curr] ? ++acc[curr] : acc[curr] = 1
+                return acc
+            }, {})
+
+        const matchingLen = Math.max(...Object.values(res), 0);
+
+        customLog(this.commitPrefix,"Got", res, "from", Array.from(this.matchIndex.values()), "with", matchingLen, "when total", totalLen)
+
+
+        if (matchingLen + 1 > totalLen / 2) {
+            this._commitIndex = Math.max(...Array.from(this.matchIndex.values()));
+            this.pushToStorage();
+            customLog(this.commitPrefix,"Committed", this._commitIndex)
+        } else {
+            customLog(this.commitPrefix,"NOT COMMITTED")
+        }
+    }
+
+    private pushToStorage() {
+        const start = this.lastApplied;
+        const end = this.commitIndex;
+        for (let i = start + 1; i <= end; i++) {
+            const entry = this.logEntries[i];
+            this.storage.set(entry.command.key, entry.command.value);
+        }
+        this._lastApplied = end;
+        customLog(this.commitPrefix,"Pushed to storage", Array.from(this.storage.storage.entries()))
+    }
 }

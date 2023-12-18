@@ -14,9 +14,14 @@ import {clearTimeout} from "timers";
 import {RaftStorage} from "./RaftStorage";
 import {RaftLogEntry} from "./RaftLogEntry";
 import {TwoWayMap} from "./TwoWayMap";
+import {customLog} from "../utils";
 //Clear-Host; yarn doc; $env:RAFTPORT='5000'; $env:EXPRESSPORT='3000'; yarn packdev
 //Clear-Host; yarn doc; $env:RAFTPORT='6000'; $env:EXPRESSPORT='3001'; yarn packdev
 //Clear-Host; yarn doc; $env:RAFTPORT='7000'; $env:EXPRESSPORT='3002'; yarn packdev
+
+//clear && yarn doc &&export RAFTPORT='5000' &&export EXPRESSPORT='3000' && yarn packdev
+//clear && yarn doc &&export RAFTPORT='6000' &&export EXPRESSPORT='3001' && yarn packdev
+//clear && yarn doc &&export RAFTPORT='7000' &&export EXPRESSPORT='3002' && yarn packdev
 export class RaftNode {
     private server: net.Server | undefined = undefined;
     private state: SystemState = {
@@ -32,7 +37,8 @@ export class RaftNode {
     private filteredPorts: number[];
     private electionTimeout: NodeJS.Timeout | undefined = undefined
     private heartbeatInterval: NodeJS.Timeout | undefined = undefined
-    private _logEntries: RaftLogEntry = new RaftLogEntry()
+    private _storage: RaftStorage = new RaftStorage();
+    private _logEntries: RaftLogEntry = new RaftLogEntry(this._storage)
     private SECONDS_MULTIPLIER: number = 20;
 
     private electPrefix = "🗳️ELECTION"
@@ -58,9 +64,9 @@ export class RaftNode {
 
     public start() {
         this.server = net.createServer(this.socketHandler.bind(this));
-        this.server.listen(this.selfPort, '127.0.0.1');
+        this.server.listen(this.selfPort, 'localhost');
 
-        console.log("Server listening on port: " + this.selfPort);
+        customLog(this.connPrefix, "Server listening on port: " + this.selfPort);
 
         this.filteredPorts.forEach(port => {
             this.selfConnect(port)
@@ -90,25 +96,8 @@ export class RaftNode {
         return this._logEntries
     }
 
-    //SECTION: REPLICATION
-
-    private sendAppendEntriesToClient(port: number) {
-        const nextIndex = this.logEntries.getNextIndex(port) as number;
-        const entries = this.logEntries.getEntriesFrom(nextIndex);
-        this.sendAppendEntries(
-            this.clients.find(c => c.remotePort == this.clientPortMap.rGet(port)) as net.Socket,
-            entries,
-            nextIndex - 1,
-            this.logEntries.getLogTerm(nextIndex - 1) as number
-        )
-    }
-
-    private bcReplicate() {
-        this.filteredPorts.forEach(port => {
-            if (this.clientPortMap.rHas(port)) {
-                this.sendAppendEntriesToClient(port)
-            }
-        })
+    get storage() {
+        return this._storage
     }
 
     //SECTION: TIME
@@ -117,40 +106,30 @@ export class RaftNode {
         return ms * this.SECONDS_MULTIPLIER
     }
 
-    //SECTION: LOGS
-
-    private getPrefix(prefix: string) {
-        return `[${prefix} - ${new Date().getSeconds()}.${new Date().getMilliseconds()}]`
-    }
-
-    private customLog(prefix: string, ...args: any[]) {
-        console.log(this.getPrefix(prefix), ...args)
-    }
-
     //SECTION: SOCKET MESSAGE ENCODDING | DECODING | SENDING
 
     private bcMsg(data: Message) {
         this.clients.forEach(client => {
             client.write(JSON.stringify(data))
         })
-        this.customLog((this.writePrefix), "Sent BC", data, "To", this.clientPortMap)
+        customLog((this.writePrefix), "Sent BC", data, "To", this.clientPortMap)
     }
 
     private sendMsg(client: net.Socket, data: Message) {
         client.write(JSON.stringify(data));
-        this.customLog((this.writePrefix), "Sent to node ", data, client.remotePort)
+        customLog((this.writePrefix), "Sent to node ", data, client.remotePort)
     }
 
     private acceptMsg(data: string): Message {
         const json = JSON.parse(data)
-        this.customLog((this.readPrefix), "Got ", json)
+        customLog((this.readPrefix), "Got ", json)
         return json as Message
     }
 
     //SECTION: CONNECTIONS
 
     private socketHandler(socket: net.Socket) {
-        this.customLog((this.connPrefix), "Connection", socket.remoteAddress, socket.remotePort, this.clients.map(c => c.remotePort))
+        customLog((this.connPrefix), "Connection", socket.remoteAddress, socket.remotePort, this.clients.map(c => c.remotePort))
         const port = socket.remotePort as number;
 
         const popClient = () => {
@@ -163,7 +142,7 @@ export class RaftNode {
 
         socket.on("data", (raw) => {
             const msgstr = raw.toString();
-            this.customLog(this.readPrefix, "Msg from", port, this.clientPortMap.get(port))
+            customLog(this.readPrefix, "Msg from", port, this.clientPortMap.get(port))
 
             const msg = this.acceptMsg(msgstr)
             switch (msg.type) {
@@ -186,12 +165,12 @@ export class RaftNode {
         });
 
         socket.on("end", () => {
-            this.customLog((this.connPrefix), "Disconnected from port: ", port)
+            customLog((this.connPrefix), "Disconnected from port: ", port)
             popClient()
         })
 
         socket.on("error", (error) => {
-            this.customLog((this.connPrefix), "Error in connection to port: ", port)
+            customLog((this.connPrefix), "Error in connection to port: ", port)
             popClient()
         });
 
@@ -200,11 +179,11 @@ export class RaftNode {
 
     private selfConnect(port: number) {
 
-        this.customLog((this.selfConnPrefix), "Trying to connect to port: " + port)
+        customLog((this.selfConnPrefix), "Trying to connect to port: " + port)
         const client = net.createConnection({
             port: port
         }, () => {
-            this.customLog((this.selfConnPrefix), "Connected to port: " + port, this.clients.map(c => c.remotePort))
+            customLog((this.selfConnPrefix), "Connected to port: " + port, this.clients.map(c => c.remotePort))
             this.sendMsg(client, {
                 type: MsgType.BondRequest,
                 data: this.selfPort
@@ -213,7 +192,7 @@ export class RaftNode {
             this.socketHandler(client)
         })
         client.on("error", (error) => {
-            this.customLog((this.selfConnPrefix), "Error connecting to port: " + port)
+            customLog((this.selfConnPrefix), "Error connecting to port: " + port)
         })
     }
 
@@ -226,7 +205,7 @@ export class RaftNode {
             currentTerm: this.state.currentTerm + 1,
             role: Role.Candidate,
         }
-        this.customLog((this.electPrefix), "Voted for self", this.state)
+        customLog((this.electPrefix), "Voted for self", this.state)
     }
 
     private resetRole2Follower() {
@@ -236,12 +215,12 @@ export class RaftNode {
             currentTerm: this.state.currentTerm,
             role: Role.Follower,
         }
-        this.customLog((this.electPrefix), "Reset to follower", this.state)
+        customLog((this.electPrefix), "Reset to follower", this.state)
     }
 
     private tryBecomeLeader() {
         if (this.state.voteCount > this.ports.length / 2) {
-            this.customLog((this.electPrefix), "Became leader", this.state)
+            customLog((this.electPrefix), "Became leader", this.state)
             this.state.role = Role.Leader
             this.logEntries.reinitIndex(this.filteredPorts);
         }
@@ -279,7 +258,7 @@ export class RaftNode {
 
         const vote = () => {
             this.state.votedFor = data.candidateId
-            this.customLog((this.electPrefix), "Voted for", data.candidateId, this.state)
+            customLog((this.electPrefix), "Voted for", data.candidateId, this.state)
         }
 
         if (data.term < this.state.currentTerm) {
@@ -317,20 +296,6 @@ export class RaftNode {
 
     //SECTION: [SEND] APPEND ENTRIES
 
-    /*    private bcAppendEntries(entries: LogEntry[] = []) {
-            this.bcMsg({
-                type: MsgType.AppendEntriesRequest,
-                data: {
-                    term: this.state.currentTerm,
-                    leaderId: this.selfPort,
-                    prevLogIndex: this.logEntries.prevIndex,
-                    prevLogTerm: this.logEntries.prevTerm,
-                    entries: entries,
-                    leaderCommit: this.logEntries.commitIndex
-                }
-            })
-        }*/
-
     private sendAppendEntries(
         client: net.Socket,
         entries: LogEntry[] = [],
@@ -346,6 +311,25 @@ export class RaftNode {
                 prevLogTerm: prevLogTerm,
                 entries: entries,
                 leaderCommit: this.logEntries.commitIndex
+            }
+        })
+    }
+
+    private sendAppendEntriesToClient(port: number) {
+        const nextIndex = this.logEntries.getNextIndex(port) as number;
+        const entries = this.logEntries.getEntriesFrom(nextIndex);
+        this.sendAppendEntries(
+            this.clients.find(c => c.remotePort == this.clientPortMap.rGet(port)) as net.Socket,
+            entries,
+            Math.max(nextIndex - 1, 0),
+            this.logEntries.getLogTerm(nextIndex - 1) as number
+        )
+    }
+
+    private bcReplicate() {
+        this.filteredPorts.forEach(port => {
+            if (this.clientPortMap.rHas(port)) {
+                this.sendAppendEntriesToClient(port)
             }
         })
     }
@@ -366,15 +350,15 @@ export class RaftNode {
         const push = () => {
             this.resetElectionTimeout()
             if (data.entries.length > 0)
-                this.customLog((this.replicatePrefix), "Pushing entries", JSON.stringify(data.entries))
+                customLog((this.replicatePrefix), "Pushing entries", JSON.stringify(data.entries))
             const res = this.logEntries.push(data)
             if (!res) {
                 if (data.entries.length > 0)
-                    this.customLog((this.replicatePrefix), "Pushing entries failed")
+                    customLog((this.replicatePrefix), "Pushing entries failed")
                 return false
             }
             if (data.entries.length > 0)
-                this.customLog(
+                customLog(
                     (this.replicatePrefix),
                     "Pushing entries succeeded",
                     JSON.stringify(this.logEntries.logEntries)
@@ -413,10 +397,10 @@ export class RaftNode {
         }
         const port = this.clientPortMap.get(client.remotePort as number) as number
         if (data.success) {
-            this.customLog((this.replicatePrefix),
-                "Incrementing matchIndex for",
+            customLog((this.replicatePrefix),
+                "Incrementing nextIndex for",
                 port, "to",
-                this.logEntries.prevIndex
+                this.logEntries.prevIndex + 1
             )
             this.logEntries.setNextIndex(
                 port,
@@ -426,8 +410,9 @@ export class RaftNode {
                 port,
                 this.logEntries.prevIndex,
             )
+            this.logEntries.leaderTryCommit()
         } else {
-            this.customLog((this.replicatePrefix),
+            customLog((this.replicatePrefix),
                 "Decrementing nextIndex for",
                 port, "to",
                 this.logEntries.getNextIndex(port) - 1);
@@ -443,9 +428,9 @@ export class RaftNode {
 
     private startElectionTimeout() {
         const randTime = this.getTime(Math.floor(Math.random() * 150) + 150)
-        this.customLog((this.timeoutPrefix), "Starting election timeout", randTime, this.state)
+        customLog((this.timeoutPrefix), "Starting election timeout", randTime, this.state)
         const timeout = setTimeout(() => {
-            this.customLog((this.timeoutPrefix), "Election timeout", randTime, this.state)
+            customLog((this.timeoutPrefix), "Election timeout", randTime, this.state)
             this.selfVote()
             this.sendVoteRequest()
             this.electionTimeout = this.startElectionTimeout()
@@ -454,10 +439,9 @@ export class RaftNode {
     }
 
     private resetElectionTimeout() {
-        this.customLog((this.timeoutPrefix), "Resetting election timeout")
+        customLog((this.timeoutPrefix), "Resetting election timeout")
         clearTimeout(this.electionTimeout)
         this.electionTimeout = this.startElectionTimeout()
-        // timeout.refresh()
     }
 
     private startHeartbeatInterval() {
