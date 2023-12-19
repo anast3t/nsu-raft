@@ -15,6 +15,7 @@ import {RaftStorage} from "./RaftStorage";
 import {RaftLogEntry} from "./RaftLogEntry";
 import {TwoWayMap} from "./TwoWayMap";
 import {customLog} from "../utils";
+
 //Clear-Host; yarn doc; $env:RAFTPORT='5000'; $env:EXPRESSPORT='3000'; yarn packdev
 //Clear-Host; yarn doc; $env:RAFTPORT='6000'; $env:EXPRESSPORT='3001'; yarn packdev
 //Clear-Host; yarn doc; $env:RAFTPORT='7000'; $env:EXPRESSPORT='3002'; yarn packdev
@@ -22,6 +23,7 @@ import {customLog} from "../utils";
 //clear && yarn doc &&export RAFTPORT='5000' &&export EXPRESSPORT='3000' && yarn packdev
 //clear && yarn doc &&export RAFTPORT='6000' &&export EXPRESSPORT='3001' && yarn packdev
 //clear && yarn doc &&export RAFTPORT='7000' &&export EXPRESSPORT='3002' && yarn packdev
+
 export class RaftNode {
     private server: net.Server | undefined = undefined;
     private state: SystemState = {
@@ -146,6 +148,7 @@ export class RaftNode {
 
             const msg = this.acceptMsg(msgstr)
             switch (msg.type) {
+                //TODO: Атомарность либо обработки, либо хертбита
                 case MsgType.BondRequest:
                     this.clientPortMap.set(port, msg.data)
                     break;
