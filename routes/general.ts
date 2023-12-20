@@ -1,6 +1,7 @@
 import express, {Request, Response} from "express";
 import {raftNode} from "../initRaftNode";
 import {Role} from "../types";
+import {app, setLateAnswer} from "../initExpress";
 
 const router = express.Router();
 
@@ -29,8 +30,23 @@ router.post('/set', (req: Request, res: Response)=>{
         res.sendStatus(400)
         return
     }
-    raftNode.addLogEntry(key, val)
+    raftNode.leaderAddLogEntry(key, val)
     res.sendStatus(200)
 })
+
+router.post('/lock', (req: Request, res: Response)=> {
+    if(!raftNode.firstLock(raftNode.selfPort))
+        res.sendStatus(400)
+    else
+        setLateAnswer(raftNode.selfPort, res)
+})
+
+router.post('/unlock', (req: Request, res: Response)=> {
+    if(!raftNode.unlock())
+        res.sendStatus(400)
+    else
+        setLateAnswer(raftNode.selfPort, res)
+})
+
 
 export default router;

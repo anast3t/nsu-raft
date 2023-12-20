@@ -1,6 +1,6 @@
 export class TwoWayMap<T, V> {
-    private forwardMap: Map<T, V> = new Map();
-    private reverseMap: Map<V, T> = new Map();
+    private forwardMap: Map<T, V> = new Map<T, V>();
+    private reverseMap: Map<V, T> = new Map<V, T>();
 
     public set(key: T, value: V) {
         this.forwardMap.set(key, value);

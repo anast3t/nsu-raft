@@ -1,26 +1,33 @@
-import {AppendEntriesRequest, LogEntry} from "../types";
+import {AppendEntriesRequest, LockEvent, LockRequest, LogEntry, Role} from "../types";
 import {RaftStorage} from "./RaftStorage";
 import {customLog} from "../utils";
+import {RaftNode} from "./RaftNode";
+import {answerLateAnswer} from "../initExpress";
 
 export class RaftLogEntry {
     private _logEntries: LogEntry[] = [{
         term: 0,
         command: {
-            key: "",
-            value: ""
+            key: "init",
+            value: "init"
         }
     }]; //INDEX FROM 1
     private _commitIndex: number = 0;
     private _lastApplied: number = 0;
     private nextIndex: Map<number, number> = new Map();
     private matchIndex: Map<number, number> = new Map();
+    private raftNode: RaftNode;
+
+    private lockCommitIndex: number = 0;
 
     private commitPrefix = "💾 COMMIT"
+    private lockPrefix = "🔒 LOCK"
 
     private storage: RaftStorage;
 
-    constructor(storage: RaftStorage) {
+    constructor(storage: RaftStorage, node: RaftNode) {
         this.storage = storage;
+        this.raftNode = node;
     }
 
     get commitIndex(): number {
@@ -33,6 +40,14 @@ export class RaftLogEntry {
 
     get logEntries(): LogEntry[] {
         return this._logEntries;
+    }
+
+    get prevIndex(): number {
+        return Math.max(this.logEntries.length - 1, 0);
+    }
+
+    get prevTerm(): number {
+        return Math.max(this.logEntries[this.prevIndex].term, 0);
     }
 
     /*
@@ -83,15 +98,7 @@ export class RaftLogEntry {
         this.matchIndex.set(client, index);
     }
 
-    get prevIndex(): number {
-        return Math.max(this.logEntries.length - 1, 0);
-    }
-
-    get prevTerm(): number {
-        return Math.max(this.logEntries[this.prevIndex].term, 0);
-    }
-
-    public push(
+    public followerPush(
         data: AppendEntriesRequest
     ): boolean {
         /*
@@ -115,6 +122,24 @@ export class RaftLogEntry {
 
         data.entries.forEach(el => {
             this.logEntries.push(el);
+            let jsonEl: LockRequest | undefined = undefined
+            customLog(this.lockPrefix, "Checking EL IN APPENDIX CHECK", el)
+            try{
+                jsonEl = JSON.parse(el.command.value) as LockRequest
+                let jsonApendix = JSON.parse(this.raftNode.appendixLogEntry?.command.value??"") as LockRequest
+                customLog(this.lockPrefix, "Checking appendix", jsonEl, jsonApendix)
+                if(el.command.key === "locked_by" &&
+                    jsonEl.id == jsonApendix.id &&
+                    jsonEl.time == jsonApendix.time
+                ){
+                    customLog(this.lockPrefix, "Lock committed, CLEARING APPENDIX", el)
+                    this.lockCommitIndex = this.logEntries.length - 1
+                    this.raftNode.appendixLogEntry = undefined
+                }
+            } catch(e){
+
+            }
+
         })
 
         if (this.commitIndex < data.leaderCommit) {
@@ -143,7 +168,6 @@ export class RaftLogEntry {
 
         customLog(this.commitPrefix,"Got", res, "from", Array.from(this.matchIndex.values()), "with", matchingLen, "when total", totalLen)
 
-
         if (matchingLen + 1 > totalLen / 2) {
             this._commitIndex = Math.max(...Array.from(this.matchIndex.values()));
             this.pushToStorage();
@@ -161,6 +185,157 @@ export class RaftLogEntry {
             this.storage.set(entry.command.key, entry.command.value);
         }
         this._lastApplied = end;
+        customLog(this.lockPrefix, "Lock commit index", this.lockCommitIndex, "start", start, "end", end)
+        if(this.lockCommitIndex > start && this.lockCommitIndex <= end){
+            this.lockCommitIndex = 0
+            customLog(this.lockPrefix,
+                this.storage.lock,
+                this.storage.lock?.event === LockEvent.Lock,
+                this.storage.lock?.event == LockEvent.Lock,
+                this.storage.lock?.event == 0,
+                this.storage.lock?.event
+            )
+            if(this.storage.lock?.event === LockEvent.Update){
+                customLog(this.lockPrefix, "Got Update in Log")
+                if(this.raftNode.state.role === Role.Leader){
+                    this.raftNode.refreshUnlockTimeout()
+                }
+            }
+            else if(this.storage.lock?.event === LockEvent.Unlock){
+                customLog(this.lockPrefix, "Got Unlock in Log")
+                if(this.raftNode.state.role === Role.Leader)
+                    this.raftNode.clearUnlockTimeout()
+                else if(this.raftNode.selfPort == this.storage.lock.id){
+                    this.raftNode.clearUpdateLockInterval()
+                    this.raftNode.clearDropLockRequestTimeout()
+                    answerLateAnswer(this.raftNode.selfPort, true)
+                }
+                this.storage.deleteLock()
+            } else if(this.storage.lock?.event === LockEvent.Lock){
+                customLog(this.lockPrefix, "Got Lock in Log")
+                if(this.raftNode.state.role === Role.Leader){
+                    this.raftNode.startUnlockTimeout()
+                }
+                if(this.raftNode.selfPort == this.storage.lock.id){
+                    this.raftNode.clearDropLockRequestTimeout()
+                    answerLateAnswer(this.raftNode.selfPort, true)
+                    this.raftNode.startUpdateLockInterval()
+                }
+                customLog(this.lockPrefix, "Lock timeout started")
+            }
+        }
         customLog(this.commitPrefix,"Pushed to storage", Array.from(this.storage.storage.entries()))
+    }
+
+    public leaderSetIfEmpty(logEntry: LogEntry) {
+        if(this.storage.check_if_empty(logEntry.command.key)){
+            customLog(this.commitPrefix, "SIE success")
+
+            const lockData = JSON.parse(logEntry.command.value) as LockRequest
+            const lockDataShort = {
+                id: lockData.id,
+                time: lockData.time,
+                event: lockData.event
+            } as LockRequest
+
+            const customLogEntry: LogEntry = {
+                term: logEntry.term,
+                command: {
+                    key: logEntry.command.key,
+                    value: JSON.stringify(lockDataShort)
+                }
+            }
+
+            this.leaderPush(customLogEntry)
+            return true
+        }
+        customLog(this.commitPrefix, "SIE fail")
+        return false
+    }
+
+    public leaderSetLock(logEntry: LogEntry) {
+        customLog(this.lockPrefix, "Pushing lock in log", logEntry)
+        if(this.leaderSetIfEmpty(logEntry) && this.lockCommitIndex == 0){
+            this.lockCommitIndex = this.prevIndex + 1;
+            return true
+        }
+        return false
+    }
+
+    public leaderCompareAndSwap(logEntry: LogEntry) {
+        if(this.storage.check_if_equals(logEntry.command.key, logEntry.command.value)){
+            customLog(this.commitPrefix, "CAS success")
+            this.leaderPush(logEntry)
+            return true
+        }
+        customLog(this.commitPrefix, "CAS fail")
+        return false
+    }
+
+    public leaderCASUpdateLock(logEntry: LogEntry) {
+        const updateLock = JSON.parse(logEntry.command.value) as LockRequest
+        let compareLock: LockRequest | undefined = undefined
+        if(updateLock?.event == LockEvent.Update){
+            // @ts-ignore
+            compareLock = {
+                id: updateLock.id_old,
+                time: updateLock.time_old,
+                event: this.storage.lock?.event as LockEvent
+            }
+        }
+
+        let setLock = {
+            id: updateLock.id,
+            time: updateLock.time,
+            event: LockEvent.Update
+        } as LockRequest
+
+        const customLogEntry: LogEntry = {
+            term: logEntry.term,
+            command: {
+                key: logEntry.command.key,
+                value: JSON.stringify(setLock)
+            }
+        }
+
+        if(this.storage.check_if_equals(logEntry.command.key, JSON.stringify(compareLock))){
+            customLog(this.lockPrefix, "CAS Update success")
+            this.leaderPush(customLogEntry)
+            return true
+        }
+        customLog(this.lockPrefix, "CAS Update fail")
+        return false
+    }
+
+    public leaderCASUnlock(logEntry: LogEntry) {
+        const updateLock = JSON.parse(logEntry.command.value) as LockRequest
+        let compareLock: LockRequest | undefined = undefined
+            // @ts-ignore
+        compareLock = {
+            id: updateLock.id,
+            time: updateLock.time,
+            event: this.storage.lock?.event as LockEvent
+        }
+        let setLock = {
+            id: updateLock.id,
+            time: updateLock.time,
+            event: LockEvent.Unlock
+        } as LockRequest
+
+        const customLogEntry: LogEntry = {
+            term: logEntry.term,
+            command: {
+                key: logEntry.command.key,
+                value: JSON.stringify(setLock)
+            }
+        }
+
+        if(this.storage.check_if_equals(logEntry.command.key, JSON.stringify(compareLock))){
+            customLog(this.lockPrefix, "CAS Update success")
+            this.leaderPush(customLogEntry)
+            return true
+        }
+        customLog(this.lockPrefix, "CAS Update fail")
+        return false
     }
 }

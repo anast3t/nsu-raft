@@ -1,6 +1,6 @@
 import {
     AppendEntriesRequest,
-    AppendEntriesResponse,
+    AppendEntriesResponse, LockEvent, LockRequest,
     LogEntry,
     Message,
     MsgType,
@@ -14,7 +14,9 @@ import {clearTimeout} from "timers";
 import {RaftStorage} from "./RaftStorage";
 import {RaftLogEntry} from "./RaftLogEntry";
 import {TwoWayMap} from "./TwoWayMap";
-import {customLog} from "../utils";
+import {customLog, getMilliseconds, getSeconds} from "../utils";
+import app, {answerLateAnswer, setLateAnswer} from "../initExpress";
+
 
 //Clear-Host; yarn doc; $env:RAFTPORT='5000'; $env:EXPRESSPORT='3000'; yarn packdev
 //Clear-Host; yarn doc; $env:RAFTPORT='6000'; $env:EXPRESSPORT='3001'; yarn packdev
@@ -26,22 +28,28 @@ import {customLog} from "../utils";
 
 export class RaftNode {
     private server: net.Server | undefined = undefined;
-    private state: SystemState = {
+    private _state: SystemState = {
         role: Role.Follower,
         currentTerm: 0,
         votedFor: 0,
         voteCount: 0,
+        leaderId: 0
     };
     private clients: net.Socket[] = [];
-    private selfPort: number;
+    private _selfPort: number;
     private ports: number[];
     private clientPortMap = new TwoWayMap<number, number>(); // clientPort -> realPort
     private filteredPorts: number[];
     private electionTimeout: NodeJS.Timeout | undefined = undefined
     private heartbeatInterval: NodeJS.Timeout | undefined = undefined
+    private lockTimeout: NodeJS.Timeout | undefined = undefined
+    private dropLockRequestTimeout: NodeJS.Timeout | undefined = undefined
+    private updateLockInterval: NodeJS.Timeout | undefined = undefined
     private _storage: RaftStorage = new RaftStorage();
-    private _logEntries: RaftLogEntry = new RaftLogEntry(this._storage)
+    private _logEntries: RaftLogEntry = new RaftLogEntry(this._storage, this)
     private SECONDS_MULTIPLIER: number = 20;
+    private _appendixLogEntry: LogEntry | undefined = undefined
+    //TODO: appendix reset on timer
 
     private electPrefix = "🗳️ELECTION"
     private connPrefix = "🔗 CONNECTION"
@@ -50,6 +58,8 @@ export class RaftNode {
     private readPrefix = "📩 READ"
     private writePrefix = "📡 WRITE"
     private replicatePrefix = "📝 REPLICATE"
+    private commitPrefix = "💾 COMMIT"
+    private lockPrefix = "🔒 LOCK"
 
     constructor(
         args: {
@@ -57,7 +67,7 @@ export class RaftNode {
             ports: number[]
         }
     ) {
-        this.selfPort = args.selfPort;
+        this._selfPort = args.selfPort;
         this.ports = args.ports;
         this.filteredPorts = this.ports.filter(p => p !== this.selfPort);
     }
@@ -78,7 +88,7 @@ export class RaftNode {
         this.electionTimeout = this.startElectionTimeout()
     }
 
-    public addLogEntry(key: string, value: string) {
+    public leaderAddLogEntry(key: string, value: string) {
         this.logEntries.leaderPush(
             {
                 term: this.state.currentTerm,
@@ -88,6 +98,73 @@ export class RaftNode {
                 }
             }
         )
+    }
+
+    public firstLock(id: number) {
+        if(this.state.leaderId == 0){
+            return false
+        }
+        if(this.state.role == Role.Follower && !this.appendixLogEntry){
+            this._appendixLogEntry = {
+                term: this.state.currentTerm,
+                command: {
+                    key: "locked_by",
+                    value: JSON.stringify({
+                        id: id,
+                        time: getSeconds(),
+                        event: LockEvent.Lock
+                    })
+                }
+            }
+            this.startDropLockRequestTimeout()
+            return true
+        }
+        return false
+    }
+
+    public unlock() {
+        if(this.state.leaderId == 0){
+            return false
+        }
+        if(this.state.role == Role.Follower && !this.appendixLogEntry){
+            this._appendixLogEntry = {
+                term: this.state.currentTerm,
+                command: {
+                    key: "locked_by",
+                    value: JSON.stringify({
+                        id: this.storage.lock?.id,
+                        time: this.storage.lock?.time,
+                        event: LockEvent.Unlock
+                    })
+                }
+            }
+            this.startDropLockRequestTimeout()
+            return true
+        }
+        return false
+    }
+
+    public updateLock() {
+        if(this.state.leaderId == 0){
+            return false
+        }
+        if(this.state.role == Role.Follower && !this.appendixLogEntry){
+            this._appendixLogEntry = {
+                term: this.state.currentTerm,
+                command: {
+                    key: "locked_by",
+                    value: JSON.stringify({
+                        id: this.storage.lock?.id,
+                        time: getSeconds() + 10,
+                        time_old: this.storage.lock?.time,
+                        id_old: this.storage.lock?.id,
+                        event: LockEvent.Update
+                    } as LockRequest)
+                }
+            }
+            return true
+        }
+        return false
     }
 
     get role() {
@@ -101,6 +178,24 @@ export class RaftNode {
     get storage() {
         return this._storage
     }
+
+    get selfPort(){
+        return this._selfPort
+    }
+
+    get appendixLogEntry(){
+        return this._appendixLogEntry
+    }
+
+    set appendixLogEntry(entry: LogEntry | undefined){
+        this._appendixLogEntry = entry
+    }
+
+    get state() {
+        return this._state
+    }
+
+
 
     //SECTION: TIME
 
@@ -149,6 +244,7 @@ export class RaftNode {
             const msg = this.acceptMsg(msgstr)
             switch (msg.type) {
                 //TODO: Атомарность либо обработки, либо хертбита
+                //INFO: Она будет сохраняться тк асинхронные ивенты будут вызываться полностью после отработки колстэка
                 case MsgType.BondRequest:
                     this.clientPortMap.set(port, msg.data)
                     break;
@@ -202,21 +298,23 @@ export class RaftNode {
     //SECTION STATE CONTROLL
 
     private selfVote() {
-        this.state = {
+        this._state = {
             votedFor: -1,
             voteCount: 1,
             currentTerm: this.state.currentTerm + 1,
             role: Role.Candidate,
+            leaderId: 0
         }
         customLog((this.electPrefix), "Voted for self", this.state)
     }
 
     private resetRole2Follower() {
-        this.state = {
+        this._state = {
             votedFor: 0,
             voteCount: 0,
             currentTerm: this.state.currentTerm,
             role: Role.Follower,
+            leaderId: 0
         }
         customLog((this.electPrefix), "Reset to follower", this.state)
     }
@@ -254,7 +352,6 @@ export class RaftNode {
     }
 
     //SECTION: [ACCEPT] VOTE REQUEST
-
 
     private acceptVoteRequest(data: VoteRequest) {
         //TODO: Check if log is up to date
@@ -338,23 +435,28 @@ export class RaftNode {
     }
 
     private sendAppendEntriesResponse(client: net.Socket, success: boolean) {
+        let appendix = undefined
+        if(this.appendixLogEntry)
+            appendix = this.clientPortMap.get(client.remotePort as number) == this.state.leaderId ? this.appendixLogEntry : undefined
         this.sendMsg(client, {
             type: MsgType.AppendEntriesResponse,
             data: {
                 term: this.state.currentTerm,
-                success: success
+                success: success,
+                logEntry: appendix
             }
         })
     }
 
-    //SECTION: [ACCEPT] APPEAND ENTRIES
+    //SECTION: [ACCEPT] APPEND ENTRIES
 
     private acceptAppendEntries(data: AppendEntriesRequest) {
         const push = () => {
             this.resetElectionTimeout()
+            this.state.leaderId = data.leaderId
             if (data.entries.length > 0)
                 customLog((this.replicatePrefix), "Pushing entries", JSON.stringify(data.entries))
-            const res = this.logEntries.push(data)
+            const res = this.logEntries.followerPush(data)
             if (!res) {
                 if (data.entries.length > 0)
                     customLog((this.replicatePrefix), "Pushing entries failed")
@@ -364,7 +466,6 @@ export class RaftNode {
                 customLog(
                     (this.replicatePrefix),
                     "Pushing entries succeeded",
-                    JSON.stringify(this.logEntries.logEntries)
                 )
             return true
         }
@@ -413,6 +514,21 @@ export class RaftNode {
                 port,
                 this.logEntries.prevIndex,
             )
+            if(data.logEntry){
+                let entry = JSON.parse(data.logEntry.command.value) as LockRequest
+                customLog(this.lockPrefix, "GOT APPENDIX", entry)
+                if(entry.event == LockEvent.Update){
+                    customLog(this.lockPrefix, "GOT UPDATING MESSAGE")
+                    this.logEntries.leaderCASUpdateLock(data.logEntry)
+                }
+                else if(entry.event == LockEvent.Unlock){
+                    customLog(this.lockPrefix, "GOT UNLOCKING MESSAGE")
+                    this.logEntries.leaderCASUnlock(data.logEntry)
+                } else if (entry.event == LockEvent.Lock){
+                    customLog(this.lockPrefix, "GOT LOCKING MESSAGE")
+                    this.logEntries.leaderSetLock(data.logEntry)
+                }
+            }
             this.logEntries.leaderTryCommit()
         } else {
             customLog((this.replicatePrefix),
@@ -426,7 +542,6 @@ export class RaftNode {
         }
     }
 
-
     //SECTION: TIMEOUTS
 
     private startElectionTimeout() {
@@ -437,6 +552,7 @@ export class RaftNode {
             this.selfVote()
             this.sendVoteRequest()
             this.electionTimeout = this.startElectionTimeout()
+        // }, (this.selfPort * 2) - 7000)
         }, randTime)
         return timeout
     }
@@ -454,5 +570,53 @@ export class RaftNode {
                 this.bcReplicate()
             }
         }, this.getTime(100))
+    }
+
+    //SECTION: LOCK TIMEOUT
+
+    public startUnlockTimeout() {
+        const timeoutTime = (this.storage.lock?.time??2)*1000 - getMilliseconds()
+        customLog(this.timeoutPrefix, "Starting lock timeout", timeoutTime)
+        this.lockTimeout = setTimeout(() => {
+            customLog(this.timeoutPrefix, "Lock first timeout", timeoutTime)
+            this.unlock()
+        }, timeoutTime)
+    }
+
+    public refreshUnlockTimeout() {
+        customLog(this.timeoutPrefix, "Refreshing lock timeout")
+        this.lockTimeout?.refresh()
+    }
+
+    public clearUnlockTimeout() {
+        customLog(this.timeoutPrefix, "Clearing lock timeout")
+        clearTimeout(this.lockTimeout)
+    }
+
+    public startUpdateLockInterval() {
+        customLog(this.timeoutPrefix, "Starting update lock interval")
+        this.updateLockInterval = setInterval(() => {
+            customLog(this.timeoutPrefix, "Updating lock interval")
+            this.updateLock()
+        }, this.getTime(500))
+    }
+
+    public clearUpdateLockInterval() {
+        customLog(this.timeoutPrefix, "Clearing update lock interval")
+        clearInterval(this.updateLockInterval)
+    }
+
+    public startDropLockRequestTimeout() {
+        customLog(this.timeoutPrefix, "Starting drop lock request timeout")
+        this.dropLockRequestTimeout = setTimeout(() => {
+            customLog(this.timeoutPrefix, "Drop lock request timeout")
+            answerLateAnswer(this.selfPort, false, "Drop lock request timeout")
+            this.appendixLogEntry = undefined
+        }, this.getTime(500))
+    }
+
+    public clearDropLockRequestTimeout() {
+        customLog(this.timeoutPrefix, "Clearing drop lock request timeout")
+        clearTimeout(this.dropLockRequestTimeout)
     }
 }

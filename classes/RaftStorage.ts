@@ -1,4 +1,4 @@
-import {LogEntry} from "../types";
+import {LockRequest, LogEntry} from "../types";
 import {customLog} from "../utils";
 export class RaftStorage {
     private _storage: Map<string, string> = new Map();
@@ -14,8 +14,25 @@ export class RaftStorage {
     }
 
     public set(key: string, value: string) {
-        customLog(this.storagePrefix, "SET", key, value)
+        customLog(this.storagePrefix, "Set", key, value)
         this.storage.set(key, value);
-        customLog(this.storagePrefix,"STORAGE STATE", this.storage)
+        customLog(this.storagePrefix,"Storage state", this.storage)
+    }
+
+    public check_if_empty(key: string) {
+        return !this.get(key);
+    }
+
+    public check_if_equals(key: string, value: string) {
+        customLog(this.storagePrefix, "Check if equals", this.get(key), value)
+        return this.get(key) === value;
+    }
+
+    get lock(): LockRequest | undefined {
+        return JSON.parse(this.storage.get("locked_by")??"{}") as LockRequest
+    }
+
+    public deleteLock() {
+        this.storage.delete("locked_by")
     }
 }

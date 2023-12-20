@@ -9,6 +9,7 @@ export type SystemState = {
     currentTerm: number;
     votedFor: number;
     voteCount: number;
+    leaderId: number;
 }
 
 export type LogEntry = {
@@ -53,6 +54,7 @@ export type AppendEntriesRequest = {
 export type AppendEntriesResponse = {
     term: number;
     success: boolean;
+    logEntry?: LogEntry;
 }
 
 export type Message = {
@@ -70,4 +72,22 @@ export type Message = {
 } | {
     type: MsgType.BondRequest,
     data: number
+}
+
+export enum LockEvent {
+    "Lock",
+    "Unlock",
+    "Update"
+}
+
+export type LockRequest = {
+    event: LockEvent.Lock | LockEvent.Unlock;
+    id: number;
+    time: number;
+} | {
+    event: LockEvent.Update;
+    id: number;
+    time: number;
+    id_old: number;
+    time_old: number;
 }
