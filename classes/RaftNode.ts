@@ -62,6 +62,20 @@ export class RaftNode {
         this.filteredPorts = this.ports.filter(p => p !== this.selfPort);
     }
 
+    //SECTION: LOCKS
+
+    public lock(){
+
+    }
+
+    public unlock(){
+
+    }
+
+    public update(){
+
+    }
+
     //SECTION: PUBLIC
 
     public start() {
@@ -364,7 +378,7 @@ export class RaftNode {
                 customLog(
                     (this.replicatePrefix),
                     "Pushing entries succeeded",
-                    JSON.stringify(this.logEntries.logEntries)
+                    // JSON.stringify(this.logEntries.logEntries)
                 )
             return true
         }
