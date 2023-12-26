@@ -1,6 +1,8 @@
 import {
     AppendEntriesRequest,
-    AppendEntriesResponse, LockEvent, LockRequest,
+    AppendEntriesResponse,
+    LockEvent,
+    LockRequest,
     LogEntry,
     Message,
     MsgType,
@@ -15,7 +17,7 @@ import {RaftStorage} from "./RaftStorage";
 import {RaftLogEntry} from "./RaftLogEntry";
 import {TwoWayMap} from "./TwoWayMap";
 import {customLog, getMilliseconds, getSeconds} from "../utils";
-import app, {answerLateAnswer, setLateAnswer} from "../initExpress";
+import {answerLateAnswer} from "../initExpress";
 
 
 //Clear-Host; yarn doc; $env:RAFTPORT='5000'; $env:EXPRESSPORT='3000'; yarn packdev
@@ -101,67 +103,91 @@ export class RaftNode {
     }
 
     public firstLock(id: number) {
-        if(this.state.leaderId == 0){
-            return false
+        const logEntry = {
+            term: this.state.currentTerm,
+            command: {
+                key: "locked_by",
+                value: JSON.stringify({
+                    id: id,
+                    time: getSeconds(),
+                    event: LockEvent.Lock
+                })
+            }
         }
         if(this.state.role == Role.Follower && !this.appendixLogEntry){
-            this._appendixLogEntry = {
-                term: this.state.currentTerm,
-                command: {
-                    key: "locked_by",
-                    value: JSON.stringify({
-                        id: id,
-                        time: getSeconds(),
-                        event: LockEvent.Lock
-                    })
-                }
+            if(this.state.leaderId == 0){
+                return false
             }
+            this._appendixLogEntry = logEntry
             this.startDropLockRequestTimeout()
+            return true
+        }
+        customLog(this.lockPrefix, "Trying leader lock",
+            this.state.role==Role.Leader,
+            !this.storage.lock,
+            this.storage.lock,
+            id,
+            this.selfPort
+        )
+        if(this.state.role == Role.Leader && !this.storage.lock?.id && id == this.selfPort){
+            this.processLockEvents(logEntry)
             return true
         }
         return false
     }
 
     public unlock() {
-        if(this.state.leaderId == 0){
-            return false
+
+        const logEntry = {
+            term: this.state.currentTerm,
+            command: {
+                key: "locked_by",
+                value: JSON.stringify({
+                    id: this.storage.lock?.id,
+                    time: this.storage.lock?.time,
+                    event: LockEvent.Unlock
+                })
+            }
         }
         if(this.state.role == Role.Follower && !this.appendixLogEntry){
-            this._appendixLogEntry = {
-                term: this.state.currentTerm,
-                command: {
-                    key: "locked_by",
-                    value: JSON.stringify({
-                        id: this.storage.lock?.id,
-                        time: this.storage.lock?.time,
-                        event: LockEvent.Unlock
-                    })
-                }
+            if(this.state.leaderId == 0){
+                return false
             }
+            this._appendixLogEntry = logEntry
             this.startDropLockRequestTimeout()
+            return true
+        }
+        if(this.state.role == Role.Leader && this.storage.lock?.id){
+            this.processLockEvents(logEntry)
             return true
         }
         return false
     }
 
     public updateLock() {
-        if(this.state.leaderId == 0){
-            return false
+
+        const logEntry = {
+            term: this.state.currentTerm,
+            command: {
+                key: "locked_by",
+                value: JSON.stringify({
+                    id: this.storage.lock?.id,
+                    time: getSeconds() + 10,
+                    time_old: this.storage.lock?.time,
+                    id_old: this.storage.lock?.id,
+                    event: LockEvent.Update
+                } as LockRequest)
+            }
         }
         if(this.state.role == Role.Follower && !this.appendixLogEntry){
-            this._appendixLogEntry = {
-                term: this.state.currentTerm,
-                command: {
-                    key: "locked_by",
-                    value: JSON.stringify({
-                        id: this.storage.lock?.id,
-                        time: getSeconds() + 10,
-                        time_old: this.storage.lock?.time,
-                        id_old: this.storage.lock?.id,
-                        event: LockEvent.Update
-                    } as LockRequest)
-                }
+            if(this.state.leaderId == 0){
+                return false
             }
+            this._appendixLogEntry = logEntry
+            return true
+        }
+        if(this.state.role == Role.Leader && this.storage.lock?.id){
+            this.processLockEvents(logEntry)
             return true
         }
         return false
@@ -489,6 +515,22 @@ export class RaftNode {
         return false
     }
 
+    private processLockEvents(data: LogEntry){
+        let entry = JSON.parse(data.command.value) as LockRequest
+        customLog(this.lockPrefix, "GOT APPENDIX", entry)
+        if(entry.event == LockEvent.Update){
+            customLog(this.lockPrefix, "GOT UPDATING MESSAGE")
+            this.logEntries.leaderCASUpdateLock(data)
+        }
+        else if(entry.event == LockEvent.Unlock){
+            customLog(this.lockPrefix, "GOT UNLOCKING MESSAGE")
+            this.logEntries.leaderCASUnlock(data)
+        } else if (entry.event == LockEvent.Lock){
+            customLog(this.lockPrefix, "GOT LOCKING MESSAGE")
+            this.logEntries.leaderSetLock(data)
+        }
+    }
+
     private acceptAppendEntriesResponse(data: AppendEntriesResponse, client: net.Socket) {
         if (data.term < this.state.currentTerm) {
             return
@@ -515,19 +557,7 @@ export class RaftNode {
                 this.logEntries.prevIndex,
             )
             if(data.logEntry){
-                let entry = JSON.parse(data.logEntry.command.value) as LockRequest
-                customLog(this.lockPrefix, "GOT APPENDIX", entry)
-                if(entry.event == LockEvent.Update){
-                    customLog(this.lockPrefix, "GOT UPDATING MESSAGE")
-                    this.logEntries.leaderCASUpdateLock(data.logEntry)
-                }
-                else if(entry.event == LockEvent.Unlock){
-                    customLog(this.lockPrefix, "GOT UNLOCKING MESSAGE")
-                    this.logEntries.leaderCASUnlock(data.logEntry)
-                } else if (entry.event == LockEvent.Lock){
-                    customLog(this.lockPrefix, "GOT LOCKING MESSAGE")
-                    this.logEntries.leaderSetLock(data.logEntry)
-                }
+                this.processLockEvents(data.logEntry)
             }
             this.logEntries.leaderTryCommit()
         } else {
