@@ -4,12 +4,13 @@ import general from "./routes/general";
 import swaggerUi from 'swagger-ui-express';
 // @ts-ignore
 import swaggerJSON from './swagger_output.json';
-import {ReqStack} from "./classes/ReqStack";
+import {RespStack} from "./classes/RespStack";
+import {LockRespStack} from "./classes/LockRespStack";
 const app: Express = express();
 const port = parseInt(process.env.EXPRESSPORT as string);
 
-const lockReqStack: ReqStack = new ReqStack();
-const unlockReqStack: ReqStack = new ReqStack();
+const lockRespStack: LockRespStack = new LockRespStack();
+const unlockRespStack: RespStack = new RespStack();
 
 export default async () => {
     app.use(cors());
@@ -32,6 +33,6 @@ export default async () => {
 
 export {
     app,
-    lockReqStack,
-    unlockReqStack
+    lockRespStack,
+    unlockRespStack
 }

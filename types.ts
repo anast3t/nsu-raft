@@ -1,3 +1,6 @@
+import {Response} from "express";
+import {Resp} from "./classes/Resp";
+
 export enum Role {
     "Follower",
     "Candidate",
@@ -70,4 +73,14 @@ export type Message = {
 } | {
     type: MsgType.BondRequest,
     data: number
+}
+
+export type MyLock = {
+    id: number;
+    time: number;
+}
+
+export type LockRespStackElement = {
+    id: number,
+    resp: Resp
 }

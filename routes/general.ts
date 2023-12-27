@@ -1,7 +1,9 @@
 import express, {Request, Response} from "express";
 import {raftNode} from "../initRaftNode";
 import {Role} from "../types";
-import {lockReqStack, unlockReqStack} from "../initExpress";
+import {lockRespStack, unlockRespStack} from "../initExpress";
+import {Resp} from "../classes/Resp";
+import {customLog} from "../utils";
 
 const router = express.Router();
 
@@ -40,16 +42,21 @@ router.post('/lock', (req: Request, res: Response)=>{
         res.sendStatus(400)
         return
     }
-    lockReqStack.push(res)
+    lockRespStack.push({
+        id: id,
+        resp: new Resp(res)
+    })
+    raftNode.lock(id)
 })
 
 router.post('/unlock', (req: Request, res: Response)=>{
-    const id = req.body.id
+    // const id = req.body.id
     if(raftNode.role !== Role.Leader){
         res.sendStatus(400)
         return
     }
-    unlockReqStack.push(res)
+    unlockRespStack.push(res)
+    raftNode.unlock()
 })
 
 export default router;

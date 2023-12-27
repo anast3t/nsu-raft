@@ -1,6 +1,8 @@
-import {AppendEntriesRequest, LogEntry} from "../types";
+import {AppendEntriesRequest, LogEntry, Role} from "../types";
 import {RaftStorage} from "./RaftStorage";
 import {customLog} from "../utils";
+import {lockRespStack, unlockRespStack} from "../initExpress";
+import {raftNode} from "../initRaftNode";
 
 export class RaftLogEntry {
     private _logEntries: LogEntry[] = [{
@@ -159,6 +161,26 @@ export class RaftLogEntry {
         for (let i = start + 1; i <= end; i++) {
             const entry = this.logEntries[i];
             this.storage.set(entry.command.key, entry.command.value);
+            if(entry.command.key === "locked_by"){
+                if(entry.command.value !== "{}") {
+
+                    if(raftNode.role === Role.Leader){
+                        lockRespStack.respFirst("Locked")
+                        raftNode.acceptUpdates()
+                        raftNode.startUnlockTimeout()
+                    }
+
+
+                } else {
+                    customLog(this.commitPrefix,"Unlocked", lockRespStack.toString())
+
+                    if(raftNode.role === Role.Leader){
+                        unlockRespStack.respAll("Unlocked")
+                        if(!lockRespStack.isEmpty())
+                            raftNode.lock(lockRespStack.first.id)
+                    }
+                }
+            }
         }
         this._lastApplied = end;
         customLog(this.commitPrefix,"Pushed to storage", Array.from(this.storage.storage.entries()))

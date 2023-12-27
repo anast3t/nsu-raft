@@ -15,6 +15,7 @@ import {RaftStorage} from "./RaftStorage";
 import {RaftLogEntry} from "./RaftLogEntry";
 import {TwoWayMap} from "./TwoWayMap";
 import {customLog} from "../utils";
+import {lockRespStack, unlockRespStack} from "../initExpress";
 
 //Clear-Host; yarn doc; $env:RAFTPORT='5000'; $env:EXPRESSPORT='3000'; yarn packdev
 //Clear-Host; yarn doc; $env:RAFTPORT='6000'; $env:EXPRESSPORT='3001'; yarn packdev
@@ -38,10 +39,11 @@ export class RaftNode {
     private clientPortMap = new TwoWayMap<number, number>(); // clientPort -> realPort
     private filteredPorts: number[];
     private electionTimeout: NodeJS.Timeout | undefined = undefined
+    private unlockTimeout: NodeJS.Timeout | undefined = undefined
     private heartbeatInterval: NodeJS.Timeout | undefined = undefined
     private _storage: RaftStorage = new RaftStorage();
     private _logEntries: RaftLogEntry = new RaftLogEntry(this._storage)
-    private SECONDS_MULTIPLIER: number = 20;
+    private SECONDS_MULTIPLIER: number = 10;
 
     private electPrefix = "🗳️ELECTION"
     private connPrefix = "🔗 CONNECTION"
@@ -50,6 +52,7 @@ export class RaftNode {
     private readPrefix = "📩 READ"
     private writePrefix = "📡 WRITE"
     private replicatePrefix = "📝 REPLICATE"
+    private lockPrefix = "🔒 LOCK"
 
     constructor(
         args: {
@@ -64,15 +67,33 @@ export class RaftNode {
 
     //SECTION: LOCKS
 
-    public lock(){
-
+    private acceptUpdatesState: boolean = false
+    public acceptUpdates() {
+        customLog(this.lockPrefix, "Accepting updates")
+        this.acceptUpdatesState = true
+    }
+    public rejectUpdates() {
+        customLog(this.lockPrefix, "Rejecting updates")
+        this.acceptUpdatesState = false
     }
 
-    public unlock(){
-
+    public lock(id: number) {
+        if (this.storage.lockExists()) {
+            return
+        }
+        customLog(this.lockPrefix, "Locking", id)
+        this.addLogEntry("locked_by", JSON.stringify({
+            id: id,
+            time: Date.now() / 1000
+        }))
     }
 
-    public update(){
+    public unlock() {
+        this.addLogEntry("locked_by", JSON.stringify({}))
+        //TODO: Clear unlock timeout
+    }
+
+    public update() {
 
     }
 
@@ -233,6 +254,10 @@ export class RaftNode {
             role: Role.Follower,
         }
         customLog((this.electPrefix), "Reset to follower", this.state)
+        //INFO: При смене роли сбрасываем все запросы на локи, тк они не распределяются
+        lockRespStack.rejectAll("Leader is dead")
+        unlockRespStack.rejectAll("Leader is dead")
+        this.stopUnlockTimeout()
     }
 
     private tryBecomeLeader() {
@@ -469,6 +494,27 @@ export class RaftNode {
             }
         }, this.getTime(100))
     }
+
+    public startUnlockTimeout() {
+        const time = this.getTime(1000)
+        customLog(this.timeoutPrefix, "Starting unlock timeout", time)
+        this.unlockTimeout = setTimeout(() => {
+            customLog(this.timeoutPrefix, "Unlock timeout", time)
+            this.addLogEntry("locked_by", JSON.stringify({}))
+            this.rejectUpdates()
+        }, time)
+    }
+
+    public stopUnlockTimeout() {
+        clearTimeout(this.unlockTimeout)
+        customLog(this.timeoutPrefix, "Stopping unlock timeout")
+    }
+
+    public refreshUnlockTimeout() {
+        this.unlockTimeout?.refresh()
+        customLog(this.timeoutPrefix, "Refreshing unlock timeout")
+    }
+
 }
 
 //asd
