@@ -1,4 +1,4 @@
-import {AppendEntriesRequest, LogEntry, Role} from "../types";
+import {AppendEntriesRequest, LogEntry, MyLock, Role} from "../types";
 import {RaftStorage} from "./RaftStorage";
 import {customLog} from "../utils";
 import {lockRespStack, unlockRespStack} from "../initExpress";
@@ -160,27 +160,42 @@ export class RaftLogEntry {
         const end = this.commitIndex;
         for (let i = start + 1; i <= end; i++) {
             const entry = this.logEntries[i];
-            this.storage.set(entry.command.key, entry.command.value);
+            let unlockFlag = false
             if(entry.command.key === "locked_by"){
                 if(entry.command.value !== "{}") {
+                    customLog(this.commitPrefix,"Got lock", entry.command.value, "from", entry.command.key)
+                    const data = JSON.parse(entry.command.value) as MyLock
 
-                    if(raftNode.role === Role.Leader){
-                        lockRespStack.respFirst("Locked")
-                        raftNode.acceptUpdates()
-                        raftNode.startUnlockTimeout()
+                    if(!this.storage.lockExists()){
+                        customLog(this.commitPrefix,"Locking on", raftNode.role, data.id, raftNode.selfPort, data.id == raftNode.selfPort)
+                        if(raftNode.role === Role.Leader){
+                            lockRespStack.respFirst("Locked")
+                            raftNode.acceptUpdates()
+                            raftNode.startUnlockTimeout(
+                                (data.time - Date.now()/1000)*1000,
+                            )
+                        }
+                        if (data.id == raftNode.selfPort){
+                            raftNode.startLockUpdateInterval()
+                        }
                     }
-
 
                 } else {
                     customLog(this.commitPrefix,"Unlocked", lockRespStack.toString())
 
                     if(raftNode.role === Role.Leader){
                         unlockRespStack.respAll("Unlocked")
-                        if(!lockRespStack.isEmpty())
-                            raftNode.lock(lockRespStack.first.id)
+                        raftNode.stopUnlockTimeout()
+                        unlockFlag = true
                     }
+                    raftNode.stopLockUpdateInterval()
                 }
             }
+
+            this.storage.set(entry.command.key, entry.command.value);
+
+            if(!lockRespStack.isEmpty() && unlockFlag)
+                raftNode.lock(lockRespStack.first.id)
         }
         this._lastApplied = end;
         customLog(this.commitPrefix,"Pushed to storage", Array.from(this.storage.storage.entries()))

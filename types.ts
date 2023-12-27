@@ -12,6 +12,7 @@ export type SystemState = {
     currentTerm: number;
     votedFor: number;
     voteCount: number;
+    leaderId: number;
 }
 
 export type LogEntry = {
@@ -26,6 +27,7 @@ export type LogCommand = {
 
 export enum MsgType {
     "BondRequest",
+    "UpdateLockRequest",
     "VoteRequest",
     "AppendEntriesRequest",
     "VoteResponse",
@@ -73,11 +75,20 @@ export type Message = {
 } | {
     type: MsgType.BondRequest,
     data: number
+} | {
+    type: MsgType.UpdateLockRequest,
+    data: UpdateLock
 }
 
 export type MyLock = {
     id: number;
     time: number;
+}
+
+export type UpdateLock = {
+    id: number;
+    time: number;
+    timeOld: number;
 }
 
 export type LockRespStackElement = {

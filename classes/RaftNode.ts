@@ -3,9 +3,9 @@ import {
     AppendEntriesResponse,
     LogEntry,
     Message,
-    MsgType,
+    MsgType, MyLock,
     Role,
-    SystemState,
+    SystemState, UpdateLock,
     VoteRequest,
     VoteResponse
 } from "../types";
@@ -32,14 +32,16 @@ export class RaftNode {
         currentTerm: 0,
         votedFor: 0,
         voteCount: 0,
+        leaderId: 0
     };
     private clients: net.Socket[] = [];
-    private selfPort: number;
+    private _selfPort: number;
     private ports: number[];
     private clientPortMap = new TwoWayMap<number, number>(); // clientPort -> realPort
     private filteredPorts: number[];
     private electionTimeout: NodeJS.Timeout | undefined = undefined
     private unlockTimeout: NodeJS.Timeout | undefined = undefined
+    private lockUpdateInterval: NodeJS.Timeout | undefined = undefined
     private heartbeatInterval: NodeJS.Timeout | undefined = undefined
     private _storage: RaftStorage = new RaftStorage();
     private _logEntries: RaftLogEntry = new RaftLogEntry(this._storage)
@@ -60,7 +62,7 @@ export class RaftNode {
             ports: number[]
         }
     ) {
-        this.selfPort = args.selfPort;
+        this._selfPort = args.selfPort;
         this.ports = args.ports;
         this.filteredPorts = this.ports.filter(p => p !== this.selfPort);
     }
@@ -78,23 +80,77 @@ export class RaftNode {
     }
 
     public lock(id: number) {
+        customLog(this.lockPrefix, "Got lock", id)
         if (this.storage.lockExists()) {
+            customLog(this.lockPrefix, "Lock exists, rejecting locking")
             return
         }
         customLog(this.lockPrefix, "Locking", id)
         this.addLogEntry("locked_by", JSON.stringify({
             id: id,
-            time: Date.now() / 1000
+            time: Math.round(Date.now() / 1000) + 5
         }))
+    }
+
+    private update(data: UpdateLock) {
+        customLog(this.lockPrefix, "Got update", data)
+        if(!this.storage.lockExists()){
+            customLog(this.lockPrefix, "NO LOCK Rejecting update")
+            return
+        }
+        if (!this.acceptUpdatesState) {
+            customLog(this.lockPrefix, "Rejecting update")
+            return
+        }
+        if(
+            this.storage.lock.id !== data.id ||
+            this.storage.lock.time !== data.timeOld
+        ){
+            customLog(this.lockPrefix, "CAS Rejecting update", this.storage.lock, data)
+            return
+        }
+
+        const objectOnLog = {
+            id: data.id,
+            time: data.time
+        } as MyLock
+
+        customLog(this.lockPrefix, "Updating", data)
+        this.addLogEntry("locked_by", JSON.stringify(objectOnLog))
+        this.refreshUnlockTimeout((data.time - Math.round(Date.now() / 1000))*1000)
+    }
+
+    private sendUpdateLockRequest() {
+        customLog(this.lockPrefix, "Sending update lock request")
+        const updateLockData = {
+            id: this.storage.lock.id,
+            time: Math.round(Date.now() / 1000) + 6,
+            timeOld: this.storage.lock.time
+        } as UpdateLock
+
+        if(this.state.leaderId == 0){
+            customLog(this.lockPrefix, "No leader, sending update on self")
+            this.update(updateLockData)
+            return
+        }
+
+        const socket = this.clients
+                .find(c =>
+                    c.remotePort == this.clientPortMap.rGet(this.state.leaderId)
+                ) as net.Socket
+        this.sendMsg(
+            socket,
+            {
+                type: MsgType.UpdateLockRequest,
+                data: updateLockData
+            }
+        )
     }
 
     public unlock() {
         this.addLogEntry("locked_by", JSON.stringify({}))
+        this.rejectUpdates()
         //TODO: Clear unlock timeout
-    }
-
-    public update() {
-
     }
 
     //SECTION: PUBLIC
@@ -135,6 +191,10 @@ export class RaftNode {
 
     get storage() {
         return this._storage
+    }
+
+    get selfPort() {
+        return this._selfPort
     }
 
     //SECTION: TIME
@@ -186,6 +246,10 @@ export class RaftNode {
                 //TODO: Атомарность либо обработки, либо хертбита
                 case MsgType.BondRequest:
                     this.clientPortMap.set(port, msg.data)
+                    break;
+                case MsgType.UpdateLockRequest:
+                    if(this.state.role == Role.Leader)
+                        this.update(msg.data)
                     break;
                 case MsgType.VoteRequest:
                     this.sendVoteResponse(socket, this.acceptVoteRequest(msg.data))
@@ -242,6 +306,7 @@ export class RaftNode {
             voteCount: 1,
             currentTerm: this.state.currentTerm + 1,
             role: Role.Candidate,
+            leaderId: 0
         }
         customLog((this.electPrefix), "Voted for self", this.state)
     }
@@ -252,12 +317,14 @@ export class RaftNode {
             voteCount: 0,
             currentTerm: this.state.currentTerm,
             role: Role.Follower,
+            leaderId: 0
         }
         customLog((this.electPrefix), "Reset to follower", this.state)
         //INFO: При смене роли сбрасываем все запросы на локи, тк они не распределяются
         lockRespStack.rejectAll("Leader is dead")
         unlockRespStack.rejectAll("Leader is dead")
         this.stopUnlockTimeout()
+        this.acceptUpdates()
     }
 
     private tryBecomeLeader() {
@@ -391,6 +458,7 @@ export class RaftNode {
     private acceptAppendEntries(data: AppendEntriesRequest) {
         const push = () => {
             this.resetElectionTimeout()
+            this.state.leaderId = data.leaderId
             if (data.entries.length > 0)
                 customLog((this.replicatePrefix), "Pushing entries", JSON.stringify(data.entries))
             const res = this.logEntries.push(data)
@@ -495,9 +563,9 @@ export class RaftNode {
         }, this.getTime(100))
     }
 
-    public startUnlockTimeout() {
-        const time = this.getTime(1000)
-        customLog(this.timeoutPrefix, "Starting unlock timeout", time)
+    public startUnlockTimeout(_time: number) {
+        const time = _time
+        customLog(this.timeoutPrefix, "Starting unlock timeout", Math.round(time))
         this.unlockTimeout = setTimeout(() => {
             customLog(this.timeoutPrefix, "Unlock timeout", time)
             this.addLogEntry("locked_by", JSON.stringify({}))
@@ -510,9 +578,23 @@ export class RaftNode {
         customLog(this.timeoutPrefix, "Stopping unlock timeout")
     }
 
-    public refreshUnlockTimeout() {
-        this.unlockTimeout?.refresh()
-        customLog(this.timeoutPrefix, "Refreshing unlock timeout")
+    public refreshUnlockTimeout(time: number) {
+        clearTimeout(this.unlockTimeout)
+        this.startUnlockTimeout(time)
+        customLog(this.timeoutPrefix, "Refreshing unlock timeout", time)
+    }
+
+    public startLockUpdateInterval() {
+        customLog(this.timeoutPrefix, "Starting update lock interval")
+        this.lockUpdateInterval = setInterval(() => {
+            this.sendUpdateLockRequest()
+            customLog(this.timeoutPrefix, "Sending update lock request")
+        } , 2000)
+    }
+
+    public stopLockUpdateInterval() {
+        clearInterval(this.lockUpdateInterval)
+        customLog(this.timeoutPrefix, "Stopping update lock interval")
     }
 
 }
